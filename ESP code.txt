@@ -1,0 +1,162 @@
+#include <WiFi.h>
+#include <Firebase_ESP_Client.h>
+#include <DHT.h>
+
+// ---------------- WIFI ----------------
+#define WIFI_SSID "vkky"
+#define WIFI_PASSWORD "12345678"
+
+// ---------------- FIREBASE ----------------
+#define DATABASE_URL "https://exotic-plant-system-default-rtdb.firebaseio.com/"
+#define DATABASE_SECRET "JEpQAmIpYbrCrg3RSZtDYlz0IdLmsbhV71Z5rZ0A"
+
+// ---------------- DHT ----------------
+#define DHTPIN 4
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+
+// ---------------- LDR ----------------
+#define LDR_PIN 14
+
+// ---------------- MOISTURE SENSOR PINS ----------------
+#define M1 32
+#define M2 33
+#define M3 34
+#define M4 35
+
+// ---------------- RELAY PINS ----------------
+#define R1 17
+#define R2 5
+#define R3 18
+#define R4 19
+
+// ---------------- MOISTURE CALIBRATION ----------------
+#define DRY_VALUE 3200
+#define WET_VALUE 1200
+
+FirebaseData fbdo;
+FirebaseAuth auth;
+FirebaseConfig config;
+
+unsigned long sendDataPrevMillis = 0;
+unsigned long relayControlMillis = 0;
+
+// moisture values
+int moisture1 = 0;
+int moisture2 = 0;
+int moisture3 = 0;
+int moisture4 = 0;
+
+// Convert raw sensor value to moisture %
+int getMoisturePercent(int rawValue) {
+  int percent = map(rawValue, DRY_VALUE, WET_VALUE, 0, 100);
+  percent = constrain(percent, 0, 100);
+  return percent;
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  analogSetAttenuation(ADC_11db);
+  dht.begin();
+
+  pinMode(LDR_PIN, INPUT);
+
+  // Relay pins
+  pinMode(R1, OUTPUT);
+  pinMode(R2, OUTPUT);
+  pinMode(R3, OUTPUT);
+  pinMode(R4, OUTPUT);
+
+  // Start with relays OFF
+  digitalWrite(R1, HIGH);
+  digitalWrite(R2, HIGH);
+  digitalWrite(R3, HIGH);
+  digitalWrite(R4, HIGH);
+
+  // WiFi
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.print("Connecting to WiFi");
+
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
+    delay(500);
+  }
+
+  Serial.println("\nWiFi Connected");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+
+  // Firebase
+  config.database_url = DATABASE_URL;
+  config.signer.tokens.legacy_token = DATABASE_SECRET;
+
+  Firebase.begin(&config, &auth);
+  Firebase.reconnectWiFi(true);
+
+  Serial.println("Firebase Connected");
+}
+
+void loop() {
+
+  // ================= SENSOR READ + FIREBASE UPLOAD =================
+  if (millis() - sendDataPrevMillis > 5000 || sendDataPrevMillis == 0) {
+    sendDataPrevMillis = millis();
+
+    // Read raw values
+    int raw1 = analogRead(M1);
+    int raw2 = analogRead(M2);
+    int raw3 = analogRead(M3);
+    int raw4 = analogRead(M4);
+
+    // Convert to %
+    moisture1 = getMoisturePercent(raw1);
+    moisture2 = getMoisturePercent(raw2);
+    moisture3 = getMoisturePercent(raw3);
+    moisture4 = getMoisturePercent(raw4);
+
+    float temperature = dht.readTemperature();
+    float humidity = dht.readHumidity();
+
+    int ldrState = digitalRead(LDR_PIN);
+
+    Serial.println("\n========== SENSOR DATA ==========");
+    Serial.print("Moisture1: "); Serial.print(moisture1); Serial.println("%");
+    Serial.print("Moisture2: "); Serial.print(moisture2); Serial.println("%");
+    Serial.print("Moisture3: "); Serial.print(moisture3); Serial.println("%");
+    Serial.print("Moisture4: "); Serial.print(moisture4); Serial.println("%");
+    Serial.print("Temperature: "); Serial.print(temperature); Serial.println(" C");
+    Serial.print("Humidity: "); Serial.print(humidity); Serial.println(" %");
+    Serial.print("LDR State: "); Serial.println(ldrState);
+    Serial.println("=================================");
+
+    if (!isnan(temperature) && !isnan(humidity)) {
+      FirebaseJson json;
+      json.set("moisture1", moisture1);
+      json.set("moisture2", moisture2);
+      json.set("moisture3", moisture3);
+      json.set("moisture4", moisture4);
+      json.set("temperature", temperature);
+      json.set("humidity", humidity);
+      json.set("ldr", ldrState);
+
+      if (Firebase.RTDB.setJSON(&fbdo, "/sensors", &json)) {
+        Serial.println("Sensor data uploaded");
+      } else {
+        Serial.println(fbdo.errorReason());
+      }
+    }
+  }
+
+  // ================= AUTOMATIC RELAY CONTROL =================
+  if (millis() - relayControlMillis > 2000) {
+    relayControlMillis = millis();
+
+    digitalWrite(R1, (moisture1 >= 80) ? LOW : HIGH);
+    digitalWrite(R2, (moisture2 >= 80) ? LOW : HIGH);
+    digitalWrite(R3, (moisture3 >= 80) ? LOW : HIGH);
+    digitalWrite(R4, (moisture4 >= 80) ? LOW : HIGH);
+
+    Serial.println("Relay status updated automatically");
+  }
+}
